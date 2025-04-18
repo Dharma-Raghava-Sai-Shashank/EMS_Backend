@@ -62,65 +62,100 @@ const upload = multer({
 // Authentication Routes
 // ======================
 app.post("/register", async (req, res) => {
-  const { name, email, password, role, venueDetails, organizationDetails } =
-    req.body;
-
   try {
-    const userDoc = await UserModel.create({
+    const { name, email, password, role } = req.body;
+
+    // Check if user already exists
+    const existingUser = await UserModel.findOne({ email });
+    if (existingUser) {
+      return res.status(400).json({ error: "User already exists" });
+    }
+
+    // Hash password
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    // Create new user
+    const user = new UserModel({
       name,
       email,
-      password: bcrypt.hashSync(password, bcryptSalt),
+      password: hashedPassword,
       role,
-      ...(role === "venue_owner" ? { venueDetails } : {}),
-      ...(role === "organizer" ? { organizationDetails } : {}),
     });
-    res.json(userDoc);
-  } catch (e) {
-    res.status(422).json(e);
+
+    await user.save();
+
+    // Generate token
+    const token = jwt.sign(
+      { userId: user._id, role: user.role },
+      jwtSecret,
+      { expiresIn: "7d" }
+    );
+
+    // Remove password from user object
+    const userWithoutPassword = user.toObject();
+    delete userWithoutPassword.password;
+
+    res.status(201).json({ token, user: userWithoutPassword });
+  } catch (error) {
+    console.error("Registration error:", error);
+    res.status(500).json({ error: "Registration failed" });
   }
 });
 
 app.post("/login", async (req, res) => {
-  const { email, password } = req.body;
-  const userDoc = await UserModel.findOne({ email });
+  try {
+    const { email, password } = req.body;
 
-  if (!userDoc) {
-    return res.status(404).json({ error: "User not found" });
-  }
-
-  const passOk = bcrypt.compareSync(password, userDoc.password);
-  if (!passOk) {
-    return res.status(401).json({ error: "Invalid password" });
-  }
-
-  jwt.sign(
-    { email: userDoc.email, id: userDoc._id },
-    jwtSecret,
-    {},
-    (err, token) => {
-      if (err) {
-        return res.status(500).json({ error: "Failed to generate token" });
-      }
-      res.cookie("token", token).json(userDoc);
+    if (!email || !password) {
+      return res.status(400).json({ error: "Email and password are required" });
     }
-  );
+
+    const user = await UserModel.findOne({ email });
+    if (!user) {
+      return res.status(401).json({ error: "Invalid credentials" });
+    }
+
+    const isMatch = await bcrypt.compare(password, user.password);
+    if (!isMatch) {
+      return res.status(401).json({ error: "Invalid credentials" });
+    }
+
+    const token = jwt.sign(
+      { userId: user._id, role: user.role },
+      jwtSecret,
+      { expiresIn: "7d" }
+    );
+
+    // Remove password from user object
+    const userWithoutPassword = user.toObject();
+    delete userWithoutPassword.password;
+
+    res.json({ token, user: userWithoutPassword });
+  } catch (error) {
+    console.error("Login error:", error);
+    res.status(500).json({ error: "Login failed", details: error.message });
+  }
 });
 
-app.get("/profile", (req, res) => {
-  const { token } = req.cookies;
-  if (token) {
-    jwt.verify(token, jwtSecret, {}, async (err, userData) => {
-      if (err) throw err;
-      const { name, email, _id, role } = await UserModel.findById(userData.id);
-      res.json({ name, email, _id, role });
+app.get("/profile", auth, async (req, res) => {
+  try {
+    const user = await UserModel.findById(req.user._id);
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
+    }
+    res.json({
+      name: user.name,
+      email: user.email,
+      _id: user._id,
+      role: user.role,
     });
-  } else {
-    res.json(null);
+  } catch (error) {
+    res.status(500).json({ error: "Failed to fetch profile" });
   }
 });
 
 app.post("/logout", (req, res) => {
-  res.cookie("token", "").json(true);
+  res.json({ message: "Logged out successfully" });
 });
 
 // ======================
