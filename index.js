@@ -12,26 +12,29 @@ const multer = require("multer");
 const path = require("path");
 const { auth, checkRole } = require("./middleware/auth");
 const Ticket = require("./models/Ticket");
-const User = require("./models/User");
-const Event = require("./models/Event");
 
 const app = express();
 
+// Constants
 const bcryptSalt = bcrypt.genSaltSync(10);
 const jwtSecret = process.env.JWT_SECRET || "bsbsfbrnsftentwnnwnwn";
 
+// Middleware
 app.use(express.json());
 app.use(cookieParser());
 app.use(
   cors({
     credentials: true,
     origin: process.env.Frontend_URL,
+    methods: ["GET", "POST", "PUT", "DELETE", "PATCH"],
+    allowedHeaders: ["Content-Type", "Authorization"],
   })
 );
 
+// Database Connection
 mongoose.connect(process.env.MONGO_URL);
 
-// Configure multer for file uploads
+// Multer Configuration
 const storage = multer.diskStorage({
   destination: function (req, file, cb) {
     cb(null, "uploads/");
@@ -53,10 +56,6 @@ const upload = multer({
     }
     cb(null, true);
   },
-});
-
-app.get("/test", (req, res) => {
-  res.json("test ok");
 });
 
 // ======================
@@ -84,34 +83,30 @@ app.post("/register", async (req, res) => {
 app.post("/login", async (req, res) => {
   const { email, password } = req.body;
   const userDoc = await UserModel.findOne({ email });
-  if (userDoc) {
-    const passOk = bcrypt.compareSync(password, userDoc.password);
-    if (passOk) {
-      jwt.sign(
-        { email: userDoc.email, id: userDoc._id },
-        jwtSecret,
-        {},
-        (err, token) => {
-          if (err) throw err;
-          res.cookie("token", token).json(userDoc);
-        }
-      );
-    } else {
-      res.status(422).json("pass not ok");
-    }
-  } else {
-    res.json("not found");
+
+  if (!userDoc) {
+    return res.status(404).json({ error: "User not found" });
   }
+
+  const passOk = bcrypt.compareSync(password, userDoc.password);
+  if (!passOk) {
+    return res.status(401).json({ error: "Invalid password" });
+  }
+
+  jwt.sign(
+    { email: userDoc.email, id: userDoc._id },
+    jwtSecret,
+    {},
+    (err, token) => {
+      if (err) {
+        return res.status(500).json({ error: "Failed to generate token" });
+      }
+      res.cookie("token", token).json(userDoc);
+    }
+  );
 });
 
-app.post("/logout", (req, res) => {
-  res.cookie("token", "").json(true);
-});
-
-// ======================
-// User Profile Routes
-// ======================
-app.get("/profile", auth, async (req, res) => {
+app.get("/profile", (req, res) => {
   const { token } = req.cookies;
   if (token) {
     jwt.verify(token, jwtSecret, {}, async (err, userData) => {
@@ -124,62 +119,73 @@ app.get("/profile", auth, async (req, res) => {
   }
 });
 
-app.put("/profile", auth, upload.single("avatar"), async (req, res) => {
-  try {
-    const { name, email } = req.body;
-    const user = await UserModel.findById(req.user._id);
-
-    if (!user) {
-      return res.status(404).json({ error: "User not found" });
-    }
-
-    user.name = name || user.name;
-    user.email = email || user.email;
-
-    if (req.file) {
-      user.avatar = req.file.path;
-    }
-
-    await user.save();
-    res.json(user);
-  } catch (error) {
-    res.status(500).json({ error: "Failed to update profile" });
-  }
+app.post("/logout", (req, res) => {
+  res.cookie("token", "").json(true);
 });
 
 // ======================
 // Venue Management Routes
 // ======================
-app.post(
-  "/venues",
-  auth,
-  checkRole(["venue_owner"]),
-  upload.array("images", 5),
-  async (req, res) => {
-    try {
-      const venueData = { ...req.body };
-      venueData.owner = req.user._id;
-      venueData.images = req.files.map((file) => file.path);
-      venueData.capacity = Number(venueData.capacity);
-      venueData.pricePerDay = Number(venueData.pricePerDay);
-      venueData.availability = venueData.availability === "true";
-
-      const venue = await VenueModel.create(venueData);
-      await UserModel.findByIdAndUpdate(req.user._id, {
-        $push: { venues: venue._id },
-      });
-      res.json(venue);
-    } catch (error) {
-      res.status(500).json({ error: "Failed to create venue" });
+app.post("/venues", auth, upload.array("images", 5), async (req, res) => {
+  try {
+    if (!req.user || req.user.role !== "venue_owner") {
+      return res
+        .status(403)
+        .json({ error: "Only venue owners can create venues" });
     }
+
+    const venueData = { ...req.body };
+    venueData.capacity = Number(venueData.capacity);
+    venueData.pricePerDay = Number(venueData.pricePerDay);
+    venueData.availability =
+      venueData.availability === "true" || venueData.availability === true;
+
+    if (typeof venueData.amenities === "string") {
+      try {
+        venueData.amenities = JSON.parse(venueData.amenities);
+      } catch (e) {
+        console.error("Error parsing amenities:", e);
+        return res.status(400).json({ error: "Invalid amenities format" });
+      }
+    }
+
+    if (req.files && req.files.length > 0) {
+      venueData.images = req.files.map((file) => file.path);
+    }
+
+    venueData.owner = req.user._id;
+
+    const requiredFields = ["name", "address", "capacity", "pricePerDay"];
+    const missingFields = requiredFields.filter((field) => !venueData[field]);
+    if (missingFields.length > 0) {
+      return res.status(400).json({
+        error: "Missing required fields",
+        details: `Missing: ${missingFields.join(", ")}`,
+      });
+    }
+
+    const venue = await VenueModel.create(venueData);
+    await UserModel.findByIdAndUpdate(req.user._id, {
+      $push: { venues: venue._id },
+    });
+
+    res.status(201).json(venue);
+  } catch (err) {
+    console.error("Error creating venue:", err);
+    res.status(500).json({
+      error: "Failed to create venue",
+      details: err.message,
+    });
   }
-);
+});
 
 app.get("/venues", async (req, res) => {
   try {
-    const venues = await VenueModel.find()
-      .populate("owner", "name email")
-      .populate("reviews.user", "name");
+    let query = {};
+    if (req.user && req.user.role === "venue_owner") {
+      query.owner = req.user._id;
+    }
+    const venues = await VenueModel.find(query).populate("owner", "name email");
     res.json(venues);
   } catch (error) {
     res.status(500).json({ error: "Failed to fetch venues" });
@@ -197,65 +203,137 @@ app.get("/venues/:id", async (req, res) => {
   }
 });
 
-app.put(
-  "/venues/:id",
+// ======================
+// Event Management Routes
+// ======================
+app.post(
+  "/events",
   auth,
-  checkRole(["venue_owner"]),
+  checkRole(["organizer"]),
   upload.array("images", 5),
   async (req, res) => {
     try {
-      const venue = await VenueModel.findById(req.params.id);
+      const eventData = { ...req.body };
+      eventData.images = req.files ? req.files.map((file) => file.path) : [];
+      eventData.organizer = req.user._id;
+
+      eventData.expectedAttendees = Number(eventData.expectedAttendees);
+      eventData.budget = Number(eventData.budget);
+      eventData.price = Number(eventData.price);
+
+      if (eventData.date) {
+        eventData.eventDate = eventData.date;
+        delete eventData.date;
+      }
+      if (eventData.time) {
+        eventData.eventTime = eventData.time;
+        delete eventData.time;
+      }
+
+      const requiredFields = [
+        "title",
+        "description",
+        "venue",
+        "eventDate",
+        "eventTime",
+        "expectedAttendees",
+        "budget",
+        "category",
+        "price",
+      ];
+
+      const missingFields = requiredFields.filter((field) => !eventData[field]);
+      if (missingFields.length > 0) {
+        return res.status(400).json({
+          error: "Missing required fields",
+          details: `Please fill in the following fields: ${missingFields.join(
+            ", "
+          )}`,
+        });
+      }
+
+      const venue = await VenueModel.findById(eventData.venue);
       if (!venue) {
         return res.status(404).json({ error: "Venue not found" });
       }
 
-      if (venue.owner.toString() !== req.user._id.toString()) {
-        return res.status(403).json({ error: "Not authorized" });
+      if (!venue.availability) {
+        return res.status(400).json({
+          error: "Venue not available",
+          details: "This venue is currently unavailable",
+        });
       }
 
-      const updateData = { ...req.body };
-      if (req.files && req.files.length > 0) {
-        updateData.images = req.files.map((file) => file.path);
+      if (eventData.expectedAttendees > venue.capacity) {
+        return res.status(400).json({
+          error: "Capacity exceeded",
+          details: `Expected attendees (${eventData.expectedAttendees}) exceed venue capacity (${venue.capacity})`,
+        });
       }
 
-      const updatedVenue = await VenueModel.findByIdAndUpdate(
-        req.params.id,
-        updateData,
-        { new: true }
-      );
-      res.json(updatedVenue);
+      const eventDuration = 1;
+      const venueCost = venue.pricePerDay * eventDuration;
+      if (eventData.budget < venueCost) {
+        return res.status(400).json({
+          error: "Insufficient budget",
+          details: `Budget (${eventData.budget}) is insufficient for venue cost (${venueCost})`,
+        });
+      }
+
+      const event = await EventModel.create(eventData);
+      res.status(201).json(event);
     } catch (error) {
-      res.status(500).json({ error: "Failed to update venue" });
-    }
-  }
-);
-
-app.delete(
-  "/venues/:id",
-  auth,
-  checkRole(["venue_owner"]),
-  async (req, res) => {
-    try {
-      const venue = await VenueModel.findById(req.params.id);
-      if (!venue) {
-        return res.status(404).json({ error: "Venue not found" });
-      }
-
-      if (venue.owner.toString() !== req.user._id.toString()) {
-        return res.status(403).json({ error: "Not authorized" });
-      }
-
-      await VenueModel.findByIdAndDelete(req.params.id);
-      await UserModel.findByIdAndUpdate(req.user._id, {
-        $pull: { venues: req.params.id },
+      console.error("Event creation error:", error);
+      res.status(500).json({
+        error: "Failed to create event",
+        details: error.message,
       });
-      res.json({ message: "Venue deleted successfully" });
-    } catch (error) {
-      res.status(500).json({ error: "Failed to delete venue" });
     }
   }
 );
 
+app.get("/events", auth, async (req, res) => {
+  try {
+    let query = {};
+    if (req.user.role === "organizer") {
+      query.organizer = req.user._id;
+    } else if (req.user.role === "venue_owner") {
+      const user = await UserModel.findById(req.user._id);
+      if (!user.venues || user.venues.length === 0) {
+        return res.status(200).json([]);
+      }
+      query.venue = { $in: user.venues };
+    }
+
+    const events = await EventModel.find(query)
+      .populate("organizer", "name email")
+      .populate("venue", "name address");
+
+    res.json(events);
+  } catch (error) {
+    console.error("Error fetching events:", error);
+    res.status(500).json({
+      error: "Failed to fetch events",
+      details: error.message,
+    });
+  }
+});
+
+app.get("/events/:id", async (req, res) => {
+  try {
+    const event = await EventModel.findById(req.params.id)
+      .populate("organizer", "name email")
+      .populate("venue", "name address capacity amenities")
+      .populate("attendees", "name email");
+    res.json(event);
+  } catch (error) {
+    res.status(500).json({ error: "Failed to fetch event" });
+  }
+});
+
+// ======================
+// Venue Owner Routes
+// ======================
 app.put(
   "/venues/:id/availability",
   auth,
@@ -277,108 +355,166 @@ app.put(
       await venue.save();
       res.json(venue);
     } catch (error) {
-      res.status(500).json({ error: "Failed to update availability" });
+      console.error("Error updating venue availability:", error);
+      res.status(500).json({
+        error: "Failed to update availability",
+        details: error.message,
+      });
     }
   }
 );
-
-// ======================
-// Event Management Routes
-// ======================
-app.post(
-  "/events",
-  auth,
-  checkRole(["organizer"]),
-  upload.array("images", 5),
-  async (req, res) => {
-    try {
-      const eventData = { ...req.body };
-      eventData.organizer = req.user._id;
-      eventData.images = req.files.map((file) => file.path);
-      eventData.expectedAttendees = Number(eventData.expectedAttendees);
-      eventData.budget = Number(eventData.budget);
-      eventData.price = Number(eventData.price);
-
-      const event = await EventModel.create(eventData);
-      res.json(event);
-    } catch (error) {
-      res.status(500).json({ error: "Failed to create event" });
-    }
-  }
-);
-
-app.get("/events", async (req, res) => {
-  try {
-    const events = await EventModel.find()
-      .populate("organizer", "name email")
-      .populate("venue", "name address")
-      .populate("attendees", "name email");
-    res.json(events);
-  } catch (error) {
-    res.status(500).json({ error: "Failed to fetch events" });
-  }
-});
-
-app.get("/events/:id", async (req, res) => {
-  try {
-    const event = await EventModel.findById(req.params.id)
-      .populate("organizer", "name email")
-      .populate("venue", "name address capacity amenities")
-      .populate("attendees", "name email");
-    res.json(event);
-  } catch (error) {
-    res.status(500).json({ error: "Failed to fetch event" });
-  }
-});
 
 app.put(
-  "/events/:id",
+  "/events/:id/status",
   auth,
-  checkRole(["organizer"]),
-  upload.array("images", 5),
+  checkRole(["venue_owner"]),
   async (req, res) => {
     try {
+      const { status } = req.body;
       const event = await EventModel.findById(req.params.id);
-      if (!event) {
-        return res.status(404).json({ error: "Event not found" });
-      }
+      const venue = await VenueModel.findById(event.venue);
 
-      if (event.organizer.toString() !== req.user._id.toString()) {
+      if (venue.owner.toString() !== req.user._id.toString()) {
         return res.status(403).json({ error: "Not authorized" });
       }
 
-      const updateData = { ...req.body };
-      if (req.files && req.files.length > 0) {
-        updateData.images = req.files.map((file) => file.path);
-      }
-
-      const updatedEvent = await EventModel.findByIdAndUpdate(
-        req.params.id,
-        updateData,
-        { new: true }
-      );
-      res.json(updatedEvent);
+      event.status = status;
+      await event.save();
+      res.json(event);
     } catch (error) {
-      res.status(500).json({ error: "Failed to update event" });
+      res.status(500).json({ error: "Failed to update event status" });
     }
   }
 );
 
-app.delete("/events/:id", auth, checkRole(["organizer"]), async (req, res) => {
+// ======================
+// Review Routes
+// ======================
+app.post("/venues/:id/reviews", auth, async (req, res) => {
   try {
-    const event = await EventModel.findById(req.params.id);
-    if (!event) {
-      return res.status(404).json({ error: "Event not found" });
-    }
+    const { rating, comment } = req.body;
+    const venue = await VenueModel.findById(req.params.id);
 
-    if (event.organizer.toString() !== req.user._id.toString()) {
-      return res.status(403).json({ error: "Not authorized" });
-    }
+    venue.reviews.push({
+      user: req.user._id,
+      rating,
+      comment,
+    });
 
-    await EventModel.findByIdAndDelete(req.params.id);
-    res.json({ message: "Event deleted successfully" });
+    const totalRating = venue.reviews.reduce(
+      (sum, review) => sum + review.rating,
+      0
+    );
+    venue.rating = totalRating / venue.reviews.length;
+
+    await venue.save();
+    res.json(venue);
   } catch (error) {
-    res.status(500).json({ error: "Failed to delete event" });
+    res.status(500).json({ error: "Failed to add review" });
+  }
+});
+
+app.post("/events/:id/reviews", auth, async (req, res) => {
+  try {
+    const { rating, comment } = req.body;
+    const event = await EventModel.findById(req.params.id);
+
+    event.reviews.push({
+      user: req.user._id,
+      rating,
+      comment,
+    });
+
+    await event.save();
+    res.json(event);
+  } catch (error) {
+    res.status(500).json({ error: "Failed to add review" });
+  }
+});
+
+// ======================
+// Ticket Management Routes
+// ======================
+app.post("/tickets", auth, async (req, res) => {
+  try {
+    const ticketData = req.body;
+
+    if (
+      !ticketData.userId ||
+      !ticketData.eventId ||
+      !ticketData.quantity ||
+      !ticketData.totalAmount ||
+      !ticketData.eventDetails ||
+      !ticketData.ticketDetails ||
+      !ticketData.qrCode
+    ) {
+      return res.status(400).json({ error: "Missing required fields" });
+    }
+
+    if (
+      !ticketData.eventDetails.title ||
+      !ticketData.eventDetails.date ||
+      !ticketData.eventDetails.time ||
+      !ticketData.eventDetails.venue ||
+      !ticketData.eventDetails.price
+    ) {
+      return res.status(400).json({ error: "Missing required event details" });
+    }
+
+    if (
+      !ticketData.ticketDetails.price ||
+      !ticketData.ticketDetails.purchaseDate
+    ) {
+      return res.status(400).json({ error: "Missing required ticket details" });
+    }
+
+    const newTicket = new Ticket(ticketData);
+    await newTicket.save();
+
+    return res.status(201).json({
+      success: true,
+      ticket: newTicket,
+    });
+  } catch (error) {
+    console.error("Error creating ticket:", error);
+    return res.status(500).json({
+      error: "Failed to create ticket",
+      details: error.message,
+    });
+  }
+});
+
+app.get("/tickets/:id", async (req, res) => {
+  try {
+    const tickets = await Ticket.find();
+    res.json(tickets);
+  } catch (error) {
+    console.error("Error fetching tickets:", error);
+    res.status(500).json({ error: "Failed to fetch tickets" });
+  }
+});
+
+app.get("/tickets/user/:userId", (req, res) => {
+  const userId = req.params.userId;
+  Ticket.find({ userId: userId })
+    .populate("eventId")
+    .then((tickets) => {
+      res.json(tickets);
+    })
+    .catch((error) => {
+      console.error("Error fetching user tickets:", error);
+      res.status(500).json({ error: "Failed to fetch user tickets" });
+    });
+});
+
+app.delete("/tickets/:id", async (req, res) => {
+  try {
+    const ticketId = req.params.id;
+    await Ticket.findByIdAndDelete(ticketId);
+    res.status(204).send();
+  } catch (error) {
+    console.error("Error deleting ticket:", error);
+    res.status(500).json({ error: "Failed to delete ticket" });
   }
 });
 
@@ -388,21 +524,40 @@ app.delete("/events/:id", auth, checkRole(["organizer"]), async (req, res) => {
 app.get("/event/venue-requests", auth, async (req, res) => {
   try {
     const user = await UserModel.findById(req.user._id);
+
     if (!user || user.role !== "venue_owner") {
       return res.status(403).json({ error: "Unauthorized" });
+    }
+
+    if (!user.venues || user.venues.length === 0) {
+      return res.status(404).json({ error: "No venues found for this user" });
     }
 
     const events = await EventModel.find({
       "venueRequest.status": "pending",
       venue: { $in: user.venues },
     })
-      .populate("organizer", "name email")
-      .populate("venue", "name address capacity pricePerDay availability")
+      .populate({
+        path: "organizer",
+        select: "name email",
+      })
+      .populate({
+        path: "venue",
+        select: "name address capacity pricePerDay availability",
+      })
       .sort({ "venueRequest.requestedAt": -1 });
 
+    if (!events || events.length === 0) {
+      return res.status(200).json([]);
+    }
+
     res.json(events);
-  } catch (error) {
-    res.status(500).json({ error: "Failed to fetch venue requests" });
+  } catch (err) {
+    console.error("Error in venue requests endpoint:", err);
+    res.status(500).json({
+      error: "Failed to fetch venue requests",
+      details: err.message,
+    });
   }
 });
 
@@ -430,83 +585,23 @@ app.patch("/vevent/:id/venue-request", auth, async (req, res) => {
     await event.save();
     res.json({ success: true, event });
   } catch (error) {
+    console.error("Error processing venue request:", error);
     res.status(500).json({ error: "Failed to process venue request" });
-  }
-});
-
-// ======================
-// Ticket Management Routes
-// ======================
-app.post("/tickets", auth, async (req, res) => {
-  try {
-    const ticketData = req.body;
-    const newTicket = new Ticket(ticketData);
-    await newTicket.save();
-    res.status(201).json(newTicket);
-  } catch (error) {
-    res.status(500).json({ error: "Failed to create ticket" });
-  }
-});
-
-app.get("/tickets/user/:userId", auth, async (req, res) => {
-  try {
-    const tickets = await Ticket.find({ userId: req.params.userId })
-      .populate("eventId")
-      .sort({ purchaseDate: -1 });
-    res.json(tickets);
-  } catch (error) {
-    res.status(500).json({ error: "Failed to fetch tickets" });
-  }
-});
-
-// ======================
-// Review Routes
-// ======================
-app.post("/events/:id/reviews", auth, async (req, res) => {
-  try {
-    const { rating, comment } = req.body;
-    const event = await EventModel.findById(req.params.id);
-
-    if (!event) {
-      return res.status(404).json({ error: "Event not found" });
-    }
-
-    event.reviews.push({
-      user: req.user._id,
-      rating,
-      comment,
-    });
-
-    await event.save();
-    res.json(event);
-  } catch (error) {
-    res.status(500).json({ error: "Failed to add review" });
   }
 });
 
 // ======================
 // User Events Routes
 // ======================
-
-app.get(
-  "/my-venues",
-  auth,
-  checkRole(["venue_owner"]),
-  async (req, res) => {
-    try {
-      const user = await UserModel.findById(req.user._id).populate("venues");
-      res.json(user.venues);
-    } catch (error) {
-      res.status(500).json({ error: "Failed to fetch venues" });
-    }
-  }
-);
-
 app.get("/my-events", auth, async (req, res) => {
   try {
     const user = await UserModel.findById(req.user._id);
-    let events;
 
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    let events;
     if (user.role === "organizer") {
       events = await EventModel.find({ organizer: user._id })
         .populate("venue", "name address")
@@ -526,10 +621,35 @@ app.get("/my-events", auth, async (req, res) => {
 
     res.json(events);
   } catch (error) {
+    console.error("Error fetching user's events:", error);
     res.status(500).json({ error: "Failed to fetch events" });
   }
 });
 
+app.get("/my-venues", auth, checkRole(["venue_owner"]), async (req, res) => {
+  try {
+    const user = await UserModel.findById(req.user._id);
+
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    if (!user.venues || user.venues.length === 0) {
+      return res.status(200).json([]);
+    }
+
+    const venues = await VenueModel.find({ _id: { $in: user.venues } })
+      .populate("owner", "name email")
+      .sort({ createdAt: -1 });
+
+    res.json(venues);
+  } catch (error) {
+    console.error("Error fetching venues:", error);
+    res.status(500).json({ error: "Failed to fetch venues" });
+  }
+});
+
+// Start Server
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
