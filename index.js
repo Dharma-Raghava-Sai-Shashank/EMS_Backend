@@ -85,11 +85,9 @@ app.post("/register", async (req, res) => {
     await user.save();
 
     // Generate token
-    const token = jwt.sign(
-      { userId: user._id, role: user.role },
-      jwtSecret,
-      { expiresIn: "7d" }
-    );
+    const token = jwt.sign({ userId: user._id, role: user.role }, jwtSecret, {
+      expiresIn: "7d",
+    });
 
     // Remove password from user object
     const userWithoutPassword = user.toObject();
@@ -120,11 +118,9 @@ app.post("/login", async (req, res) => {
       return res.status(401).json({ error: "Invalid credentials" });
     }
 
-    const token = jwt.sign(
-      { userId: user._id, role: user.role },
-      jwtSecret,
-      { expiresIn: "7d" }
-    );
+    const token = jwt.sign({ userId: user._id, role: user.role }, jwtSecret, {
+      expiresIn: "7d",
+    });
 
     // Remove password from user object
     const userWithoutPassword = user.toObject();
