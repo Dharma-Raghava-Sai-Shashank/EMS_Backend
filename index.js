@@ -24,7 +24,7 @@ app.use(express.json());
 app.use(cookieParser());
 app.use(
   cors({
-    origin: ['https://ems-frontend-syin.vercel.app'],
+    origin: ['https://ems-frontend-syin.vercel.app','https://eventify-live-beta.vercel.app'],
     methods: ["GET", "POST", "PUT", "DELETE", "PATCH"],
     allowedHeaders: ["Content-Type", "Authorization"],
     credentials: true,
